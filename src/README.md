@@ -1,1 +1,1 @@
-readme
+This is the R markdown containing the code for all the data manipulation, analyses, table and figure generation for the manuscript "Metatranscriptomic response of the wheat holobiont to decreasing soil water content"
