@@ -1,0 +1,841 @@
+---
+title: "MT-exp1-Pande"
+author: "Etienne Yergeau"
+date: "May 2, 2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r libraries}
+install.packages("pacman")
+pacman::p_load(pacman, EBSeq, ggpubr, tidyverse, RColorBrewer, here, UpSetR, ggplotify, pheatmap, grid)
+```
+
+
+
+```{r import data and prepare}
+#Import files
+MT <- read.table(file = here("data", "raw", "merged_gene_abundance.tsv"), row.names = 1, header = T, comment.char = "", sep = "\t") # 1 269 055 obs in 47 var
+map <- read.table(file = here("data", "raw", "mapping_file.tsv"), row.names = 1, header = T, sep = "\t", comment.char = "") #47 obs in 3 var
+annot <- read.table(file = here("data", "raw", "annotations.tsv"), header = T, sep = "\t", comment.char = "", quote = "") #1269056 obs in 33 vars
+SWC <- read.table(file = here("data", "raw", "SWC_DT.txt"), header = T, sep = "\t") # 24 obs in 5 vars
+
+#prepare files
+MT.t <- t(MT)
+#Sort everything
+map.s <- map[order(row.names(map)),]
+MT.s <- MT.t[order(row.names(MT.t)),]
+row.names(MT.s) == row.names(map.s)#Sanity check -- OK
+
+#Remove large intermediate objects to free memory
+rm(MT)
+rm(MT.t)
+
+```
+
+
+```{r differential abundance-RHIZO}
+#EB test from EB seq for multiple testing of hypothesis
+
+#rhizo 25 vs.100
+map.s.rhizo <- map.s[(map.s$Sample == "Rhizosphere") & (map.s$WHC == "25" | map.s$WHC == "100"), ] # 12 obs in 3 var
+MT.rhizo <- MT.s[(map.s$Sample == "Rhizosphere") & (map.s$WHC == "25" | map.s$WHC == "100"), ]
+
+#Data file should be genes in rows and samples in columns
+MT.rhizo <- t(MT.rhizo)
+
+#Remove rows with all zeroes
+length(which(rowSums(MT.rhizo) == 0)) #75 554 out of 1269055. Should have 1 193 501 left
+MT.rhizo <- MT.rhizo[!rowSums(MT.rhizo) == 0,]
+dim(MT.rhizo) #OK: 1193501   12
+
+#Create group file L = 25, H = 100
+SWC.rhizo = as.factor(c("H", "L","H", "L","H", "L","H", "L", "L", "H", "L", "H"))
+
+#Create size Factors file
+size.rhizo = MedianNorm(MT.rhizo)
+
+#Run EBTest
+EBtestOUT.rhizo <- EBTest(MT.rhizo, Conditions = SWC.rhizo, sizeFactors = size.rhizo, maxround = 5)
+saveRDS(EBtestOUT.rhizo, file = here("output", "EBtestOUT.rhizo.RDS"))#Save intermediate file not to recalculate each time
+
+#Get results
+DE.rhizo <- GetDEResults(EBtestOUT.rhizo, FDR = 0.05)
+
+#Calculate log2 fold change and mean counts
+fold.rhizo <- data.frame(row.names = row.names(MT.rhizo))
+fold.rhizo$mean <- rowMeans(MT.rhizo)
+fold.rhizo$log2 <- log2(rowMeans(MT.rhizo[,SWC.rhizo == "L"])/rowMeans(MT.rhizo[,SWC.rhizo == "H"]))
+
+#Get annotations for DE at 0.05
+rhizo.DE.annot <- annot[annot$gene_id %in% DE.rhizo$DEfound,]
+
+#Get annotations for DE
+DE.bact.rhizo <- rhizo.DE.annot[rhizo.DE.annot$tax_kingdom == "Bacteria",2]
+bact.point.rhizo <- fold.rhizo[row.names(fold.rhizo) %in% DE.bact.rhizo,]
+DE.arch.rhizo <- rhizo.DE.annot[rhizo.DE.annot$tax_kingdom == "Archaea",2]
+arch.point.rhizo <- fold.rhizo[row.names(fold.rhizo) %in% DE.arch.rhizo,]
+DE.fun.rhizo <- rhizo.DE.annot[grep("mycota", rhizo.DE.annot$tax_phylum, ignore.case = TRUE),2]
+fun.point.rhizo <- fold.rhizo[row.names(fold.rhizo) %in% DE.fun.rhizo,]
+DE.plant.rhizo <- rhizo.DE.annot[rhizo.DE.annot$tax_phylum == "Streptophyta",2]
+plant.point.rhizo <- fold.rhizo[row.names(fold.rhizo) %in% DE.plant.rhizo,]
+DE.null.rhizo <- rhizo.DE.annot[rhizo.DE.annot$tax_kingdom == "NULL",2]
+null.point.rhizo <- fold.rhizo[row.names(fold.rhizo) %in% DE.null.rhizo,]
+DE.other.rhizo <- rhizo.DE.annot[!rhizo.DE.annot$gene_id %in% append(append(DE.bact.rhizo,DE.fun.rhizo),append(DE.plant.rhizo, append(DE.null.rhizo,DE.arch.rhizo))),2]
+other.point.rhizo <- fold.rhizo[row.names(fold.rhizo) %in% DE.other.rhizo,]
+
+#Plots
+#Only plot first 100 000 points for clarity
+volcano.rhizo <- ggplot() +
+ geom_point(data = fold.rhizo[1:100000,], aes(x = mean, y = log2)) +
+ geom_point(data = other.point.rhizo, aes(x = mean, y = log2), color = "yellow") +
+ geom_point(data = null.point.rhizo, aes(x = mean, y = log2), color = "purple") +
+ geom_point(data = bact.point.rhizo, aes(x = mean, y = log2), color = "red") +
+ geom_point(data = fun.point.rhizo, aes(x = mean, y = log2), color = "blue") +
+ geom_point(data = arch.point.rhizo, aes(x = mean, y = log2), color = "pink") +
+ geom_point(data = plant.point.rhizo, aes(x = mean, y = log2), color = "green") +
+ geom_hline(yintercept = 0, linetype = "solid") +
+ xlab("Mean read count") + 
+ ylab("Log 2 fold change (25%/100%)") + 
+ scale_x_log10() +
+ theme_bw()
+volcano.rhizo 
+
+#Sort for exporting
+rhizo.DE.annot <- rhizo.DE.annot[order(rhizo.DE.annot$gene_id),]
+DEfound.rhizo <- data.frame(DE.rhizo$DEfound)
+DEfound.rhizo <- DEfound.rhizo[order(DEfound.rhizo$DE.rhizo.DEfound),]
+fold.rhizo.DE <- fold.rhizo[row.names(fold.rhizo) %in% DE.rhizo$DEfound,]
+fold.rhizo.DE <- fold.rhizo.DE[order(row.names(fold.rhizo.DE)),]
+pval.rhizo.DE <- data.frame(DE.rhizo$PPMat[row.names(DE.rhizo$PPMat) %in% DE.rhizo$DEfound,])
+pval.rhizo.DE <- pval.rhizo.DE[order(row.names(pval.rhizo.DE)),]
+sum(rhizo.DE.annot$gene_id == DEfound.rhizo) #Sanity check, should be 21765
+sum(row.names(fold.rhizo.DE) == DEfound.rhizo) #Sanity check, should be 21765
+sum(row.names(pval.rhizo.DE) == DEfound.rhizo)#Sanity check, should be 21765
+DEfound.rhizo <- cbind(DEfound.rhizo,fold.rhizo.DE, pval.rhizo.DE, rhizo.DE.annot)
+
+#Export
+#Matrix of all genes with DE and EE p-values
+write.table(as.matrix(DE.rhizo$PPMat), file = here("output", "PPmat_rhizo.txt"), eol = "\n", sep = "\t")
+#List of the DE transcripts, p-Values, annotations, abundance
+write.table(DEfound.rhizo, file = here("output", "DEfound_rhizo.txt"), eol = "\n", sep = "\t")
+#Status of the transcript: DE, EE, or Filtered+Reason
+write.table(as.matrix(DE.rhizo$Status), file = here("output", "Status_rhizo.txt"), eol = "\n", sep = "\t")
+```
+
+```{r differential abundance-ROOT}
+#EB test from EB seq for multiple testing of hypothesis
+
+#root 25 vs.100
+map.s.root <- map.s[(map.s$Sample == "Root") & (map.s$WHC == "25" | map.s$WHC == "100"), ]
+MT.root <- MT.s[(map.s$Sample == "Root") & (map.s$WHC == "25" | map.s$WHC == "100"), ]
+
+#Data file should be genes in lines and samples in columns
+MT.root <- t(MT.root)
+
+#Remove lines with all zeroes
+length(which(rowSums(MT.root) == 0)) #132 468 out of 1269055. Should have 1 136 587 left
+MT.root <- MT.root[!rowSums(MT.root) == 0,]
+dim(MT.root) #OK: 1 136 587   11
+
+#Create group file L = 25%, H = 100%
+SWC.root <- as.factor(c("L", "L","H", "L","H", "H","L", "H", "H", "H", "L"))
+
+#Create size Factors file
+size.root = MedianNorm(MT.root)
+
+#Run EBTest
+EBtestOUT.root <- EBTest(MT.root, Conditions = SWC.root, sizeFactors = size.root, maxround = 5)
+saveRDS(EBtestOUT.root, file = here("output", "EBtestOUT.root.RDS"))#Save intermediate file not to recalculate each time
+
+#Get results
+DE.root <- GetDEResults(EBtestOUT.root, FDR = 0.05)
+
+#Calculate log2 fold change and mean counts
+fold.root <- data.frame(row.names = row.names(MT.root))
+fold.root$mean <- rowMeans(MT.root)
+fold.root$log2 <- log2(rowMeans(MT.root[,SWC.root == "L"])/rowMeans(MT.root[,SWC.root == "H"]))
+
+#Get annotations for DE at 0.05
+root.DE.annot <- annot[annot$gene_id %in% DE.root$DEfound,]
+
+#Get annotations for DE
+DE.bact.root <- root.DE.annot[root.DE.annot$tax_kingdom == "Bacteria",2]
+bact.point.root <- fold.root[row.names(fold.root) %in% DE.bact.root,]
+DE.fun.root <- root.DE.annot[grep("mycota", root.DE.annot$tax_phylum, ignore.case = TRUE),2]
+fun.point.root <- fold.root[row.names(fold.root) %in% DE.fun.root,]
+DE.plant.root <- root.DE.annot[root.DE.annot$tax_phylum == "Streptophyta",2]
+plant.point.root <- fold.root[row.names(fold.root) %in% DE.plant.root,]
+DE.null.root <- root.DE.annot[root.DE.annot$tax_kingdom == "NULL",2]
+null.point.root <- fold.root[row.names(fold.root) %in% DE.null.root,]
+DE.other.root <- root.DE.annot[!root.DE.annot$gene_id %in% append(append(DE.bact.root,DE.fun.root),append(DE.plant.root, DE.null.root)),2]
+other.point.root <- fold.root[row.names(fold.root) %in% DE.other.root,]
+
+#Plots
+#Only plot first 100 000 for clarity
+volcano.root <- ggplot() +
+ geom_point(data = fold.root[1:100000,], aes(x = mean, y = log2)) +
+ geom_point(data = other.point.root, aes(x = mean, y = log2), color = "yellow") +
+ geom_point(data = null.point.root, aes(x = mean, y = log2), color = "purple") +
+ geom_point(data = bact.point.root, aes(x = mean, y = log2), color = "red") +
+ geom_point(data = fun.point.root, aes(x = mean, y = log2), color = "blue") +
+ geom_point(data = plant.point.root, aes(x = mean, y = log2), color = "green") +
+ geom_hline(yintercept = 0, linetype = "solid") +
+ xlab("Mean read count") + 
+ ylab("Log 2 fold change (25%/100%)") + 
+ scale_x_log10() +
+ theme_bw()
+volcano.root 
+
+
+#Sort for exporting
+root.DE.annot <- root.DE.annot[order(root.DE.annot$gene_id),]
+DEfound.root <- data.frame(DE.root$DEfound)
+DEfound.root <- DEfound.root[order(DEfound.root$DE.root.DEfound),]
+fold.root.DE <- fold.root[row.names(fold.root) %in% DE.root$DEfound,]
+fold.root.DE <- fold.root.DE[order(row.names(fold.root.DE)),]
+pval.root.DE <- data.frame(DE.root$PPMat[row.names(DE.root$PPMat) %in% DE.root$DEfound,])
+pval.root.DE <- pval.root.DE[order(row.names(pval.root.DE)),]
+sum(root.DE.annot$gene_id == DEfound.root) #Sanity check, should be 42001
+sum(row.names(fold.root.DE) == DEfound.root) #Sanity check, should be 42001
+sum(row.names(pval.root.DE) == DEfound.root) #Sanity check, should be 42001
+DEfound.root <- cbind(DEfound.root,fold.root.DE, pval.root.DE, root.DE.annot)
+
+#Export
+#Matrix of all genes with DE and EE p-values
+write.table(as.matrix(DE.root$PPMat), file = here("output", "PPmat_root.txt"), eol = "\n", sep = "\t")
+#List of the DE transcripts with P-value and annotations
+write.table(DEfound.root, file = here("output", "DEfound_root.txt"), eol = "\n", sep = "\t")
+#Status of the transcript: DE, EE, or Filtered+Reason
+write.table(as.matrix(DE.root$Status), file = here("output", "Status_root.txt"), eol = "\n", sep = "\t")
+```
+
+
+```{r various stats Root}
+#How many DE gene positive, negative?
+length(fun.point.root[fun.point.root$log2 > 0,1]) #23042
+length(fun.point.root[fun.point.root$log2 < 0,1]) #232
+length(plant.point.root[plant.point.root$log2 > 0,1]) #1295
+length(plant.point.root[plant.point.root$log2 < 0,1]) #3061
+length(bact.point.root[bact.point.root$log2 > 0,1]) #2231
+length(bact.point.root[bact.point.root$log2 < 0,1]) #78
+length(other.point.root[other.point.root$log2 > 0,1]) #5895
+length(other.point.root[other.point.root$log2 < 0,1]) #863
+
+#How many total transcripts for each taxa ?
+length(annot[(annot$tax_kingdom == "Bacteria") & (annot$gene_id %in% row.names(MT.root)),2]) #365 435
+length(annot[(annot$tax_kingdom == "Archaea") & (annot$gene_id %in% row.names(MT.root)),2]) #12 792
+length(annot[(annot$tax_kingdom == "NULL") & (annot$gene_id %in% row.names(MT.root)),2]) #221 331
+length(annot[(annot$tax_kingdom == "Eukaryota") & (annot$gene_id %in% row.names(MT.root)),2]) #533 369
+length(annot[(annot$tax_kingdom == "Viruses") & (annot$gene_id %in% row.names(MT.root)),2]) #3 660
+length(annot[(annot$tax_phylum == "Streptophyta") & (annot$gene_id %in% row.names(MT.root)),2]) #200 823
+length(annot[(annot$tax_phylum == "Ascomycota") & (annot$gene_id %in% row.names(MT.root)),2]) #151 695
+length(annot[(annot$tax_phylum == "Basidiomycota") & (annot$gene_id %in% row.names(MT.root)),2]) #46 352
+length(annot[(annot$tax_phylum == "Mucoromycota") & (annot$gene_id %in% row.names(MT.root)),2]) #2 186
+(533369 - 200823 - 151695 - 46352 - 2186) #132 313
+
+```
+
+```{r various stats Rhizo}
+#How many DE gene positive, negative?
+length(fun.point.rhizo[fun.point.rhizo$log2 > 0,1]) #149
+length(fun.point.rhizo[fun.point.rhizo$log2 < 0,1]) #253
+length(plant.point.rhizo[plant.point.rhizo$log2 > 0,1]) #41
+length(plant.point.rhizo[plant.point.rhizo$log2 < 0,1]) #178
+length(bact.point.rhizo[bact.point.rhizo$log2 > 0,1]) #7938
+length(bact.point.rhizo[bact.point.rhizo$log2 < 0,1]) #6240
+length(other.point.rhizo[other.point.rhizo$log2 > 0,1]) #391
+length(other.point.rhizo[other.point.rhizo$log2 < 0,1]) #1351
+
+#How many total transcripts for each taxa ?
+length(annot[(annot$tax_kingdom == "Bacteria") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #430 984
+length(annot[(annot$tax_kingdom == "Archaea") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #14 943
+length(annot[(annot$tax_phylum == "Streptophyta") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #169 788
+length(annot[(annot$tax_phylum == "Ascomycota") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #140 046
+length(annot[(annot$tax_phylum == "Basidiomycota") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #44 485
+length(annot[(annot$tax_phylum == "Mucoromycota") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #2 214
+length(annot[(annot$tax_kingdom == "NULL") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #254 744
+length(annot[(annot$tax_kingdom == "Viruses") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #4 255
+length(annot[(annot$tax_kingdom == "Eukaryota") & (annot$gene_id %in% row.names(MT.rhizo)),2]) #488 575
+(488575 - 169788 - 140046 - 44485 - 2214) #132 042
+```
+
+```{r Plot various stats}
+stats.all <- data.frame(
+ Taxa = c("Archaea", "Bacteria", "Fungi", "Plants", "Viruses", "unclassified", "Others","Archaea", "Bacteria", "Fungi", "Plants", "Viruses", "unclassified", "Others"),
+ Comp = c("Root","Root","Root","Root","Root","Root","Root","Rhizo","Rhizo","Rhizo","Rhizo","Rhizo","Rhizo","Rhizo"),
+ Count = c(12792,365435,200233,200823,3660,221331,132313,14943, 430984, 186745,169788, 4255, 254744, 132042)
+)
+stats.DE <- data.frame(
+ Taxa = c("Bacteria-DA+", "Bacteria-DA-","Fungi-DA+", "Fungi-DA-","Plants-DA+", "Plants-DA-","unclassified", "Others","Bacteria-DA+", "Bacteria-DA-","Fungi-DA+", "Fungi-DA-","Plants-DA+", "Plants-DA-","unclassified", "Others"),
+ Comp = c("Root","Root","Root","Root","Root","Root","Root","Root", "Rhizo","Rhizo","Rhizo","Rhizo","Rhizo","Rhizo","Rhizo", "Rhizo"),
+ Count = c(2231,78,23042,232,1295,3061,5303,6758,7938,6240,149,253,41,178,5224,1583)
+)
+
+palette(c("cyan", "red", "blue", "yellow", "green", "purple", "grey"))
+stack.stats.all <- ggplot(stats.all, aes(fill = Taxa, y = Count, x = Comp)) + 
+  geom_bar( stat = "identity", position = "stack") +
+  ylab("Number of transcripts") + 
+  scale_fill_manual(values = palette()) +
+  theme_bw() +
+  scale_y_continuous( limits = c(0, 1250000), expand = c(0,0)) +
+  scale_x_discrete(name = "Compartment")
+stack.stats.all
+
+palette(c("darkred", "red","darkblue", "blue", "yellow","darkgreen", "green", "purple"))
+stack.stats.DE <- ggplot(stats.DE, aes(fill = Taxa, y = Count, x = Comp)) + 
+  geom_bar( stat = "identity", position = "stack") +
+  ylab("Number of DA transcripts") + 
+  scale_fill_manual(values = palette()) +
+  theme_bw() +
+  scale_y_continuous(limits = c(0, 45000), expand = c(0,0)) +
+  scale_x_discrete(name = "Compartment")
+stack.stats.DE  
+
+```
+
+
+```{r stack barchart taxa Rhizo}
+#Prokaryotes at phylum
+#Create data frame
+DEfound.rhizo.bact <- DEfound.rhizo[DEfound.rhizo$tax_kingdom == "Bacteria",]
+phylum.table.rhizo = DEfound.rhizo.bact %>%
+ group_by(tax_phylum) %>%
+ summarise(
+  n = n(),
+  over = sum(log2 > 0, na.rm = TRUE),
+  under = sum(log2 < 0, na.rm = TRUE),
+  
+ ) %>%
+ filter(
+  n > 100
+ )
+phylum.table.rhizo <- phylum.table.rhizo[-9,] #Remove NULL
+row.names(phylum.table.rhizo) <- phylum.table.rhizo$tax_phylum
+others.phylum.rhizo <- data.frame("Others", (14178 - sum(phylum.table.rhizo$n)), (7938 - sum(phylum.table.rhizo$over)), (6240 - sum(phylum.table.rhizo$under)))
+colnames(others.phylum.rhizo) <- colnames(phylum.table.rhizo)
+row.names(others.phylum.rhizo) <- "Others"
+phylum.table.rhizo <- rbind(phylum.table.rhizo, others.phylum.rhizo) 
+colSums(phylum.table.rhizo[,2:4]) #Should be 14178 7938 6240
+
+#Get a column for all transcripts
+annot.bact <- annot[annot$tax_kingdom == "Bacteria",]
+annot.bact.rhizo <- annot.bact[annot.bact$gene_id %in% row.names(MT.rhizo),]
+
+all.column.rhizo <- annot.bact.rhizo %>%
+ group_by(tax_phylum) %>%
+ summarise(
+  count = n(),
+  
+ )
+all.column.rhizo <- all.column.rhizo[all.column.rhizo$tax_phylum %in% phylum.table.rhizo$tax_phylum,]
+row.names(all.column.rhizo) <- all.column.rhizo$tax_phylum
+others.all.rhizo <- data.frame("Others", (430984 - sum(all.column.rhizo$count)))
+colnames(others.all.rhizo) <- colnames(all.column.rhizo)
+row.names(others.all.rhizo) <- "Others"
+all.column.rhizo <- rbind(all.column.rhizo, others.all.rhizo) 
+sum(all.column.rhizo$count)
+
+all.column.rhizo$tax_phylum == phylum.table.rhizo$tax_phylum #Sanity check
+phylum.table.rhizo <- cbind(phylum.table.rhizo,all.column.rhizo$count)
+colnames(phylum.table.rhizo) <- c("Phylum", "n", "DA+", "DA-", "All")
+
+#Prepare for ggplot
+phylum.table.rhizo.long <- gather(phylum.table.rhizo,subset,counts,3:5) #transform in long format for ggplot
+comp.rhizo.bact <- data.frame(Compartment = rep("Rhizosphere",36)) #Add a column for compartment
+phylum.table.rhizo.long <- cbind(phylum.table.rhizo.long,comp.rhizo.bact)
+#Plot with root data below
+
+##Fungi at class
+#Create data frame
+DEfound.rhizo.fun <- DEfound.rhizo[grep(".mycota", DEfound.rhizo$tax_phylum),]
+class.table.rhizo <- DEfound.rhizo.fun %>%
+ group_by(tax_class) %>%
+ summarise(
+  n = n(),
+  over = sum(log2 > 0, na.rm = TRUE),
+  under = sum(log2 < 0, na.rm = TRUE),
+  
+ ) %>%
+ filter(
+  n > 5
+ )
+row.names(class.table.rhizo) <- class.table.rhizo$tax_class
+class.table.rhizo <- class.table.rhizo[c(1,3,4,9),] #Keep same as for roots
+others.class.rhizo <- data.frame("Others", (402 - sum(class.table.rhizo$n)), (149 - sum(class.table.rhizo$over)), (253 - sum(class.table.rhizo$under)))
+colnames(others.class.rhizo) <- colnames(class.table.rhizo)
+row.names(others.class.rhizo) <- "Others"
+class.table.rhizo = rbind(class.table.rhizo, others.class.rhizo) 
+colSums(class.table.rhizo[,2:4]) #Should be 402 149 253
+
+#Get a column for all transcripts
+annot.fun <- annot[grep(".mycota", annot$tax_phylum),]
+annot.fun.rhizo <- annot.fun[annot.fun$gene_id %in% row.names(MT.rhizo),]
+
+all.column.rhizo = annot.fun.rhizo %>%
+ group_by(tax_class) %>%
+ summarise(
+  count = n(),
+  
+  
+ )
+all.column.rhizo <- all.column.rhizo[all.column.rhizo$tax_class %in% class.table.rhizo$tax_class,]
+row.names(all.column.rhizo) <- all.column.rhizo$tax_class
+others.all.rhizo <- data.frame("Others", (186745 - sum(all.column.rhizo$count)))
+colnames(others.all.rhizo) <- colnames(all.column.rhizo)
+row.names(others.all.rhizo) <- "Others"
+all.column.rhizo <- rbind(all.column.rhizo, others.all.rhizo) 
+sum(all.column.rhizo$count) #185 745
+
+all.column.rhizo$tax_class == class.table.rhizo$tax_class
+class.table.rhizo <- cbind(class.table.rhizo,all.column.rhizo$count)
+colnames(class.table.rhizo) <- c("Class", "n", "DA+", "DA-", "All")
+class.table.rhizo.long <- gather(class.table.rhizo,subset,counts,3:5) #transform in long format for ggplot
+comp.rhizo.fun <- data.frame(Compartment = rep("Rhizosphere",15))#Add a column for compartment
+class.table.rhizo.long <- cbind(class.table.rhizo.long,comp.rhizo.fun)
+#Plot together with root data below
+```
+
+```{r stack barchart taxa root}
+##Prokaryotes at phylum
+#Create data frame
+DEfound.root.bact <- DEfound.root[DEfound.root$tax_kingdom == "Bacteria",]
+phylum.table.root = DEfound.root.bact %>%
+ group_by(tax_phylum) %>%
+ summarise(
+  n = n(),
+  over = sum(log2 > 0, na.rm = TRUE),
+  under = sum(log2 < 0, na.rm = TRUE),
+  
+ ) %>%
+ filter(
+  n > 0
+ )
+phylum.table.root <- phylum.table.root[c(1,2,4,14,17,18,21,24,26,27,31),] #Match Phyla from rhizo
+row.names(phylum.table.root) <- phylum.table.root$tax_phylum
+others.phylum.root <- data.frame("Others", (2309 - sum(phylum.table.root$n)), (2231 - sum(phylum.table.root$over)), (78 - sum(phylum.table.root$under)))
+colnames(others.phylum.root) <- colnames(phylum.table.root)
+row.names(others.phylum.root) <- "Others"
+phylum.table.root <- rbind(phylum.table.root, others.phylum.root) 
+colSums(phylum.table.root[,2:4]) #Should be 2309 2231 78
+
+#Get a column for all transcripts
+annot.bact <- annot[annot$tax_kingdom == "Bacteria",]
+annot.bact.root <- annot.bact[annot.bact$gene_id %in% row.names(MT.root),]
+
+all.column.root <- annot.bact.root %>%
+ group_by(tax_phylum) %>%
+ summarise(
+  count = n(),
+  
+  
+ )
+all.column.root <- all.column.root[all.column.root$tax_phylum %in% phylum.table.root$tax_phylum,]
+row.names(all.column.root) <- all.column.root$tax_phylum
+others.all.root <- data.frame("Others", (365435 - sum(all.column.root$count)))
+colnames(others.all.root) <- colnames(all.column.root)
+row.names(others.all.root) <- "Others"
+all.column.root <- rbind(all.column.root, others.all.root) 
+sum(all.column.root$count) #365 435
+
+all.column.root$tax_phylum == phylum.table.root$tax_phylum #Sanity check
+phylum.table.root <- cbind(phylum.table.root,all.column.root$count)
+colnames(phylum.table.root) <- c("Phylum", "n", "DA+", "DA-", "All")
+phylum.table.root.long <- gather(phylum.table.root,subset,counts,3:5) #transform in long format for ggplot
+comp.root.bact <- data.frame(Compartment = rep("Root",36))#Add a column for compartment
+phylum.table.root.long <- cbind(phylum.table.root.long,comp.root.bact)
+phylum.table.root.long <- rbind(phylum.table.root.long, phylum.table.rhizo.long)
+
+
+#ggplot
+palette(c(brewer.pal(n = 9, name = "Set1"),"lightgrey", "black", "darkred", "darkblue", "darkgreen", "purple4", "darkgrey", "white"))
+stack.phyla.root <- ggplot(phylum.table.root.long, aes(fill = Phylum, y = counts, x = subset)) + 
+  geom_bar( stat = "identity", position = "fill") +
+  ylab("Fraction of transcripts") + 
+  scale_fill_manual(values = palette()) +
+  theme_bw() +
+  scale_y_continuous( expand = c(0,0)) +
+  scale_x_discrete(name = "Subset") +
+  facet_grid(.~ Compartment)
+stack.phyla.root
+
+##Fungi at class
+#Create data frame
+DEfound.root.fun <- DEfound.root[grep("mycota", DEfound.root$tax_phylum),]
+class.table.root <- DEfound.root.fun %>%
+ group_by(tax_class) %>%
+ summarise(
+  n = n(),
+  over = sum(log2 > 0, na.rm = TRUE),
+  under = sum(log2 < 0, na.rm = TRUE),
+  
+ ) %>%
+ filter(
+  n > 100
+ )
+row.names(class.table.root) <- class.table.root$tax_class
+others.class.root <- data.frame("Others", (23274 - sum(class.table.root$n)), (23042 - sum(class.table.root$over)), (232 - sum(class.table.root$under)))
+colnames(others.class.root) <- colnames(class.table.root)
+row.names(others.class.root) <- "Others"
+class.table.root = rbind(class.table.root, others.class.root) 
+colSums(class.table.root[,2:4]) #Should be 23274 23042 232
+
+#Get a column for all transcripts
+annot.fun <- annot[grep(".mycota", annot$tax_phylum),]
+annot.fun.root <- annot.fun[annot.fun$gene_id %in% row.names(MT.root),]
+
+all.column.root = annot.fun.root %>%
+ group_by(tax_class) %>%
+ summarise(
+  count = n(),
+  
+ )
+all.column.root <- all.column.root[all.column.root$tax_class %in% class.table.root$tax_class,]
+row.names(all.column.root) <- all.column.root$tax_class
+others.all.root <- data.frame("Others", (200233 - sum(all.column.root$count)))
+colnames(others.all.root) <- colnames(all.column.root)
+row.names(others.all.root) <- "Others"
+all.column.root <- rbind(all.column.root, others.all.root) 
+sum(all.column.root$count)
+
+all.column.root$tax_class == class.table.root$tax_class
+class.table.root <- cbind(class.table.root,all.column.root$count)
+colnames(class.table.root) <- c("Class", "n", "DA+", "DA-", "All")
+class.table.root.long <- gather(class.table.root,subset,counts,3:5) #transform in long format for ggplot
+comp.root.fun <- data.frame(Compartment = rep("Root",15))#Add a column for compartment
+class.table.root.long <- cbind(class.table.root.long,comp.root.fun)
+class.table.root.long <- rbind(class.table.root.long, class.table.rhizo.long)
+
+#ggplot
+palette(c(brewer.pal(n = 9, name = "Set1"),"lightgrey", "black", "darkred", "darkblue", "darkgreen", "purple4", "darkgrey", "white"))
+stack.root.class <- ggplot(class.table.root.long, aes(fill = Class, y = counts, x = subset)) + 
+  geom_bar( stat = "identity", position = "fill") +
+  ylab("Fraction of transcripts") + 
+  scale_fill_manual(values = palette()) +
+  theme_bw() +
+  scale_y_continuous( expand = c(0,0)) +
+  scale_x_discrete(name = "Subset") +
+  facet_grid(.~ Compartment)
+stack.root.class
+```
+
+```{r stack barchart COG root}
+#COG for ALL -- ROOTS
+#Create data frame
+COG.root <- DEfound.root %>%
+ group_by(cog_category) %>%
+ summarise(
+  n = n(),
+  over = sum(log2 > 0, na.rm = TRUE),
+  under = sum(log2 < 0, na.rm = TRUE),
+  
+ ) %>%
+ filter(
+  n > 100
+ )
+COG.root <- COG.root[-c(3,5,6,7,12, 16,17,19, 20),] #Remove some categories mixed and NULL... NULL: 26967  23427  3539; 
+row.names(COG.root) <- COG.root$cog_category
+others.cog.root <- data.frame("Others", (42001 - 26967 - sum(COG.root$n)), (37242 - 23427 - sum(COG.root$over)), (4758 - 3539 - sum(COG.root$under))) #Create other but omit NULL
+colnames(others.cog.root) <- colnames(COG.root)
+row.names(others.cog.root) = "Others"
+COG.root <- rbind(COG.root, others.cog.root) 
+colSums(COG.root[,2:4])
+
+#Get a column for all transcripts
+annot.root <- annot[annot$gene_id %in% row.names(MT.root),]
+
+COG.root.all = annot.root %>%
+ group_by(cog_category) %>%
+ summarise(
+  count = n(),
+  
+ )
+COG.root.all <- COG.root.all[COG.root.all$cog_category %in% COG.root$cog_category,]
+row.names(COG.root.all) <- COG.root.all$cog_category
+others.cog.root.all <- data.frame("Others", (1136587 - 772076 - sum(COG.root.all$count))) #Omit NULL
+colnames(others.cog.root.all) <- colnames(COG.root.all)
+row.names(others.cog.root.all) <- "Others"
+COG.root.all <- rbind(COG.root.all, others.cog.root.all) 
+sum(COG.root.all$count)
+
+COG.root.all$cog_category == COG.root$cog_category
+COG.root <- cbind(COG.root,COG.root.all$count)
+colnames(COG.root) <- c("COG_category", "n", "DA+", "DA-", "All")
+
+#Prepare for ggplot
+COG.root.long <- gather(COG.root,subset,counts,3:5) #transform in long format for ggplot
+comp.root.cog <- data.frame(Compartment = rep("Root",45))#Add a column for compartment
+COG.root.long <- cbind(COG.root.long,comp.root.cog)
+#Plot below with rhizo
+
+```
+
+```{r stack barchart COG Rhizo}
+#COG for ALL -- Rhizo
+#Create data frame
+COG.rhizo <- DEfound.rhizo %>%
+ group_by(cog_category) %>%
+ summarise(
+  n = n(),
+  over = sum(log2 > 0, na.rm = TRUE),
+  under = sum(log2 < 0, na.rm = TRUE),
+  
+ ) %>%
+ filter(
+  n > 100
+ )
+COG.rhizo <- COG.rhizo[COG.rhizo$cog_category %in% COG.root$COG_category,] #to have matching legends with ROOT; NULL: 13505 6061 7444
+row.names(COG.rhizo) <- COG.rhizo$cog_category
+others.COG.rhizo <- data.frame("Others", (21765 - 13505 - sum(COG.rhizo$n)), (10565 - 6061 - sum(COG.rhizo$over)), (11200 - 7444 - sum(COG.rhizo$under))) #Omit NULL from Others count
+colnames(others.COG.rhizo) <- colnames(COG.rhizo)
+row.names(others.COG.rhizo) <- "Others"
+COG.rhizo <- rbind(COG.rhizo, others.COG.rhizo) 
+colSums(COG.rhizo[,2:4]) #8260 4504 3756
+
+#Get a column for all transcripts
+annot.rhizo <- annot[annot$gene_id %in% row.names(MT.rhizo),]
+
+COG.rhizo.all = annot.rhizo %>%
+ group_by(cog_category) %>%
+ summarise(
+  count = n(),
+  
+  
+ )
+COG.rhizo.all <- COG.rhizo.all[COG.rhizo.all$cog_category %in% COG.rhizo$cog_category,]
+row.names(COG.rhizo.all) <- COG.rhizo.all$cog_category
+others.COG.rhizo.all <- data.frame("Others", (1193501 - 799568 - sum(COG.rhizo.all$count))) #Omit NULL
+colnames(others.COG.rhizo.all) <- colnames(COG.rhizo.all)
+row.names(others.COG.rhizo.all) <- "Others"
+COG.rhizo.all <- rbind(COG.rhizo.all, others.COG.rhizo.all) 
+sum(COG.rhizo.all$count)
+
+COG.rhizo.all$cog_category == COG.rhizo$cog_category
+COG.rhizo <- cbind(COG.rhizo,COG.rhizo.all$count)
+colnames(COG.rhizo) <- c("COG_category", "n", "DA+", "DA-", "All")
+
+#Prepare for ggplot
+COG.rhizo.long <- gather(COG.rhizo,subset,counts,3:5) #transform in long format for ggplot
+comp.rhizo.cog <- data.frame(Compartment = rep("Rhizosphere",45))#Add a column for compartment
+COG.rhizo.long <- cbind(COG.rhizo.long,comp.rhizo.cog)
+#Put everything together
+COG.long.both <- rbind(COG.rhizo.long, COG.root.long)
+
+
+palette(c(brewer.pal(n = 9, name = "Set1"),"lightgrey", "black", "darkred", "darkblue", "darkgreen", "purple4", "brown3", "cyan"))
+stack.COG <- ggplot(COG.long.both, aes(fill = COG_category, y = counts, x = subset)) + 
+  geom_bar( stat = "identity", position = "fill") +
+  ylab("Fraction of transcripts") + 
+  scale_fill_manual(values = palette(), guide = guide_legend(title = "COG category")) +
+  theme_bw() +
+  scale_y_continuous( expand = c(0,0)) +
+  scale_x_discrete(name = "Subset") +
+  facet_grid(. ~ Compartment)
+stack.COG  
+```
+
+```{r top 50 DE genes roots and rhizo}
+###ROOTS
+#Sort based on P-value of EE
+DEfound.root.50 <- DEfound.root[DEfound.root$PPEE == 0,] #lots of Pvalue = 0... 1491. Then take most abundant.
+DEfound.root.50 <- DEfound.root.50[order(DEfound.root.50$mean, decreasing = TRUE),]
+DEfound.root.50.defined <- DEfound.root.50[DEfound.root.50$cog_function != "NULL",] #Remove undefined
+DEfound.root.50.defined <- DEfound.root.50.defined[1:50, c(1:4, 24,25,32,34,37)] #Keep only relevant columns
+#Export
+write.table(DEfound.root.50.defined, file = here("output", "Table1.txt"), eol = "\n", sep = "\t")
+
+###RHIZO
+#Sort based on P-value of EE
+DEfound.rhizo.50 <- DEfound.rhizo[order(DEfound.rhizo$PPEE),]
+DEfound.rhizo.50.defined <- DEfound.rhizo.50[DEfound.rhizo.50$cog_function != "NULL",] #Remove undefined
+DEfound.rhizo.50.defined <- DEfound.rhizo.50.defined[1:50, c(1:4, 24,25,32,34,37)] #Keep only relevant columns
+#Export
+write.table(DEfound.rhizo.50.defined, file = here("output", "Table2.txt"), eol = "\n", sep = "\t")
+
+#Heatmaps
+#Roots
+#Create objects: one numerical and one annotations
+MT.root.50 <- MT.root[row.names(MT.root) %in% row.names(DEfound.root.50.defined),  ]
+MT.root.50 <- MT.root.50[order(row.names(MT.root.50)),]#sort
+MT.root.50 <- MT.root.50/colSums(MT.root)#Put in relative
+MT.root.50 <- scale(t(MT.root.50))
+DEfound.root.50.defined <- DEfound.root.50.defined[order(row.names(DEfound.root.50.defined)),]#sort
+colnames(MT.root.50)==row.names(DEfound.root.50.defined)#Check
+colnames(MT.root.50) <- gsub("gene_id_", "", colnames(MT.root.50))#Remove gene_id
+
+#Create annotation data frame
+SWC.root.df <- data.frame("PPT" = c("25%", "25%","100%", "25%","100%", "100%","25%", "100%", "100%", "100%", "25%"))
+root.50.class <- data.frame("Taxa" = c("Others", "Others", "Fungi", "Plant", rep("Fungi", 4), "Plant", rep("Fungi",6), "Plant", rep("Fungi", 3), "Plant", "Fungi", "Fungi", "Others", "Others", "Fungi", "NULL", "Others", "Fungi", "Fungi", "Plant", "Fungi", "Fungi", "Plant", "Others", rep("Fungi", 5), "Plant", "Others", "Plant", "Others", "Fungi", "Others", rep("Fungi", 5)))
+row.names(root.50.class) <- colnames(MT.root.50)
+MT.root.50 <- MT.root.50[order(SWC.root.df$PPT),]#Sort rows by PPT levels
+SWC.root.df <- data.frame("PPT" = SWC.root.df[order(SWC.root.df$PPT),])#Sort rows by PPT levels
+row.names(SWC.root.df) <- row.names(MT.root.50)
+
+#Plot
+ann_colors = list(PPT = c("100%" = "blue", "25%" = "red"), Taxa = c(Fungi = "blue", "NULL" = "purple", Others = "yellow", Plant = "green"))
+heatmap.root <- pheatmap(MT.root.50, annotation_row = SWC.root.df, cutree_col = 4, cutree_row = 2, gaps_row = 6,  show_rownames = F, show_colnames = T,  annotation_col = root.50.class, cluster_rows = FALSE, fontsize_col = 8, annotation_colors = ann_colors)
+
+#rhizos
+#Create objects: one numerical and one annotations
+MT.rhizo.50 <- MT.rhizo[row.names(MT.rhizo) %in% row.names(DEfound.rhizo.50.defined),  ]
+MT.rhizo.50 <- MT.rhizo.50[order(row.names(MT.rhizo.50)),]#sort
+MT.rhizo.50 <- MT.rhizo.50/colSums(MT.rhizo)#Put in relative
+MT.rhizo.50 <- scale(t(MT.rhizo.50)) #Scale gene by gene
+DEfound.rhizo.50.defined <- DEfound.rhizo.50.defined[order(row.names(DEfound.rhizo.50.defined)),]#sort
+colnames(MT.rhizo.50)==row.names(DEfound.rhizo.50.defined)#Check
+colnames(MT.rhizo.50) <- gsub("gene_id_", "", colnames(MT.rhizo.50))#Remove gene_id
+
+#Create annotation data frame
+SWC.rhizo.df <- data.frame("PPT" = c("100%", "25%","100%", "25%","100%", "25%","100%", "25%", "25%", "100%", "25%", "100%"))
+rhizo.50.class <- data.frame("Taxa" = c("Bacteria",  "Bacteria", "Fungi", "Others", "Others", "Bacteria", "Fungi", "Bacteria", "Others", "Bacteria", "Bacteria", "Others", "Fungi", "Bacteria", "Others", "Others", "Bacteria", "Bacteria", "Fungi", "Bacteria", "Bacteria", "Bacteria", "Others", "Bacteria", "Others", "Bacteria", "Bacteria", "Bacteria", "Bacteria", "Bacteria", "Others", rep("Bacteria",9), "Archaea",  "Bacteria", "Others", "Bacteria", "Bacteria", "Bacteria", "Bacteria", "Others", "Bacteria", "Bacteria"))
+row.names(rhizo.50.class) <- colnames(MT.rhizo.50)
+MT.rhizo.50 <- MT.rhizo.50[order(SWC.rhizo.df$PPT),]#Sort rows by PPT levels
+SWC.rhizo.df <- data.frame("PPT" = SWC.rhizo.df[order(SWC.rhizo.df$PPT),])#Sort rows by PPT levels
+row.names(SWC.rhizo.df) <- row.names(MT.rhizo.50)
+
+#Plot
+ann_colors = list(PPT = c("100%" = "blue", "25%" = "red"), Taxa = c(Others = "yellow", Archaea = "pink", Bacteria = "red", Fungi = "blue"))
+heatmap.rhizo <- pheatmap(MT.rhizo.50, annotation_row = SWC.rhizo.df, cutree_col = 4, show_rownames = F, show_colnames = T,  annotation_col = rhizo.50.class, cluster_rows = FALSE, cutree_rows = 2, gaps_row = 6, fontsize_col = 8, annotation_colors = ann_colors)
+```
+
+```{r upset diagrams}
+DEfound.root <- read.table(file = here("output", "DEfound_root.txt"),  sep = "\t")
+DEfound.rhizo <- read.table(file = here("output", "DEfound_rhizo.txt"),  sep = "\t")
+
+#Create gene lists for all different categories
+root.DE.plus.list <- DEfound.root[DEfound.root$log2>0,1] #37 242 elements
+root.DE.minus.list <- DEfound.root[DEfound.root$log2<0,1] #4 758 elements
+rhizo.DE.plus.list <- DEfound.rhizo[DEfound.rhizo$log2>0,1] #10 565 elements
+rhizo.DE.minus.list <- DEfound.rhizo[DEfound.rhizo$log2<0,1] #11 200 elements
+root.all.list <- row.names(MT.root) #1 136 587 elements
+rhizo.all.list <- row.names (MT.rhizo) #1 193 501 elements
+
+#Create a data frame
+upset.data <- data.frame("Gene" = colnames(MT.s))
+upset.data [,2:7] <- data.frame("Rhizosphere-all" = as.integer(upset.data$Gene %in% rhizo.all.list),
+                                "Rhizosphere-DA-positive" = as.integer(upset.data$Gene %in% rhizo.DE.plus.list),
+                                "Rhizosphere-DA-negative" = as.integer(upset.data$Gene %in% rhizo.DE.minus.list),
+                                "Root-all" = as.integer(upset.data$Gene %in% root.all.list),
+                                "Root-DA-positive" = as.integer(upset.data$Gene %in% root.DE.plus.list),
+                                "Root-DA-negative" = as.integer(upset.data$Gene %in% root.DE.minus.list)
+  )
+
+#Check: should be 1193510 10565 11200 1136587 37242 4758
+colSums(upset.data [,2:7])
+
+#Plot using the UpSetR package
+upset.plot <- upset(upset.data[,c(3,4,6,7)], nsets = 4)
+
+#Get genes positive-positive and negative-negative
+pos.pos <- upset.data[upset.data$Rhizosphere.DA.positive == 1 & upset.data$Root.DA.positive == 1,1] #513
+neg.neg <- upset.data[upset.data$Rhizosphere.DA.negative == 1 & upset.data$Root.DA.negative == 1,1] #47
+pos.pos.annot <- annot[annot$gene_id %in% pos.pos,]#Get annotations
+neg.neg.annot <- annot[annot$gene_id %in% neg.neg,]#Get annotations
+
+#Taxonomic and functional summary 
+pos.pos.COG = pos.pos.annot %>%
+ group_by(cog_category) %>%
+ summarise(
+  count = n(),
+  )
+pos.pos.tax = pos.pos.annot %>%
+ group_by(tax_phylum) %>%
+ summarise(
+  count = n(),
+  )
+
+neg.neg.COG = neg.neg.annot %>%
+ group_by(cog_category) %>%
+ summarise(
+  count = n(),
+  )
+neg.neg.tax = neg.neg.annot %>%
+ group_by(tax_phylum) %>%
+ summarise(
+  count = n(),
+  )
+
+write.table(file = here("output", "pos.pos.annot.txt"), pos.pos.annot)
+write.table(file = here("output", "neg.neg.annot.txt"), neg.neg.annot)
+
+```
+
+```{r soil water content}
+SWC$PPT <- factor(SWC$PPT, c("25", "50", "75", "100"))#Reorder manually, and as factor
+min(SWC$SWC)
+max(SWC$SWC) #To know where to put the letters
+
+#ANOVA
+bartlett.test(SWC$SWC, SWC$PPT) #P = 0.5661, OK
+shapiro.test(SWC$SWC) #P = 0.7003, OK
+anova.SWC <- aov(SWC~PPT+Block, data = SWC)
+summary(anova.SWC) #P = 0.000367 for PPT and P = 0.049648 for Blocks
+TukeyHSD(anova.SWC) #25 = a, 50 = ab, 75 = bc, 100 = c
+tukey.SWC <- data.frame(letters = c("a", "ab", "bc", "c"), PPT = c("25","50", "75", "100"), position = c(25,25,25,25))#create dataframe with tukey results
+
+#Boxplot
+palette(c("red", "orange","purple", "blue"))
+SWC.plot <- ggplot(SWC, aes(y = SWC, x = PPT, fill = PPT)) + 
+  geom_boxplot(outlier.color = NA, outlier.size = 0, outlier.shape = NA) +
+  geom_point(position = position_jitterdodge()) +
+  ylab("Soil water content (%)") + 
+  scale_fill_manual(values = palette()) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_x_discrete(name = "Precipitation treatments")+
+  geom_text(data = tukey.SWC, aes(x = PPT, y = position, label = letters)) #Add letters from tukey
+  
+SWC.plot
+
+```
+
+```{r create figures}
+#Figure 1
+fig1 <- ggarrange(SWC.plot, stack.stats.all,stack.stats.DE, labels = c("A", "B", "C"))
+fig1
+
+ggsave(file = here("output", "figs", "fig1.eps"), fig1, width = 7, height = 7, units = "in")
+ggsave(file = here("output", "figs", "fig1.tiff"), fig1, width = 7, height = 7, units = "in", dpi = 600, compression = "lzw")
+
+#Figure 2
+fig2 <- ggarrange(volcano.root, volcano.rhizo, labels = c("A", "B"))
+fig2
+
+ggsave(file = here("output", "figs", "fig2.eps"), fig2, width = 7, height = 7, units = "in")
+ggsave(file = here("output", "figs", "fig2.tiff"), fig2, width = 7, height = 7, units = "in", dpi = 600, compression = "lzw")
+
+#Figure 3
+fig3 <- ggarrange(stack.root.class, stack.phyla.root, labels = c("A", "B"), legend = "right", ncol = 1, nrow = 2)
+fig3
+
+ggsave(file = here("output", "figs", "fig3.eps"), fig3, width = 7, height = 7, units = "in")
+ggsave(file = here("output", "figs", "fig3.tiff"), fig3, width = 7, height = 7, units = "in", dpi = 600, compression = "lzw")
+
+#Figure 4
+fig4 <- stack.COG
+fig4
+
+ggsave(file = here("output", "figs", "fig4.eps"), fig4, width = 7, height = 7, units = "in")
+ggsave(file = here("output", "figs", "fig4.tiff"), fig4, width = 7, height = 7, units = "in", dpi = 600, compression = "lzw")
+
+#Figure 5
+fig5 <- ggarrange(heatmap.root[[4]], heatmap.rhizo[[4]], labels = c("A", "B"))
+fig5
+
+ggsave(file = here("output", "figs", "fig5.eps"), fig5, width = 14, height = 7, units = "in")
+ggsave(file = here("output", "figs", "fig5.tiff"), fig5, width = 14, height = 7, units = "in", dpi = 600, compression = "lzw")
+
+
+#Figure 6
+upset.plot
+fig6 <- grid.grab(wrap.grobs = TRUE)
+
+ggsave(file = here("output", "figs", "fig6.eps"), fig6, width = 7, height = 7, units = "in")
+ggsave(file = here("output", "figs", "fig6.tiff"), fig6, width = 7, height = 7, units = "in", dpi = 600, compression = "lzw")
+
+```
+
+
